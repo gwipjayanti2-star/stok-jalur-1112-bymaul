@@ -232,7 +232,7 @@
                         <img src="https://www.image2url.com/r2/default/files/1785642175342-6f1d4abc-728d-4f28-8c4a-3b499c8b88c5.png" alt="Logo" class="w-7 h-7 object-contain">
                     </div>
                     <div>
-                        <h1 class="font-bold text-gray-800 text-lg leading-tight hidden sm:block">1112 GWIP Connect</h1>
+                        <h1 class="font-bold text-gray-800 text-lg leading-tight hidden sm:block">1112 GWIP</h1>
                         <h1 class="font-bold text-gray-800 text-lg leading-tight sm:hidden">GWIP</h1>
                         <p class="text-[10px] text-gray-500 font-medium uppercase tracking-wider hidden sm:block">Cloud Stock Management</p>
                     </div>
@@ -520,6 +520,12 @@
         function formatShiftDisplay(rawShift) {
             if (!rawShift) return '';
             let str = String(rawShift).trim();
+            
+            // Logika baca timestamp (Pisahkan YYYY-MM-DD tersembunyi dengan format aslinya)
+            if (str.includes('|')) {
+                str = str.split('|')[1];
+            }
+
             if (str.length > 20 && (str.includes('GMT') || str.includes('T00:00:00'))) {
                 let d = new Date(str);
                 if (!isNaN(d.getTime())) {
@@ -728,7 +734,6 @@
 
             if (!isRefresh) {
                 loader.style.display = 'flex';
-                // Reset loader UI in case it was an error before
                 loaderContent.innerHTML = `
                     <div class="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full loader-spin mb-3"></div>
                     <p class="font-semibold text-blue-800 animate-pulse text-lg">Mengambil Data Server...</p>
@@ -757,7 +762,6 @@
                 
                 updateUIAfterDataLoad();
                 
-                // Success logic
                 if (btn) btn.disabled = false;
                 if (icon) icon.classList.remove('fa-spin');
                 if (!isRefresh) {
@@ -900,7 +904,6 @@
             }
         }
 
-        // STRICT ONLINE SUBMIT KEDATANGAN
         function submitKedatangan(e) {
             e.preventDefault();
             
@@ -937,7 +940,6 @@
                 })
                 .then(data => {
                     if (data.success) {
-                        // Hanya tambahkan ke memori lokal JIKA API merespons sukses
                         stateBatches.push(newBatch);
                         showToast('Tersimpan di Cloud', `Data Batch ${newBatch.batch} berhasil disimpan ke Spreadsheet.`, 'success');
                         resetFormKedatangan();
@@ -973,6 +975,7 @@
 
             const day = tglVal.split('-')[2];
             const shiftStr = `${day}/S${shiftSelect}`; 
+            const shiftWithDate = `${tglVal}|${shiftStr}`; // SIMPAN TANGGAL KESELURUHAN (TIMESTAMP)
             const sisaBaru = lastSisa - qty;
             
             const btnSubmit = document.getElementById('btn-submit-out');
@@ -983,7 +986,7 @@
 
             const formData = new URLSearchParams();
             formData.append('action', 'addPengambilan');
-            formData.append('data', JSON.stringify({ batchId: batchId, shift: shiftStr, qty: qty, sisa: sisaBaru }));
+            formData.append('data', JSON.stringify({ batchId: batchId, shift: shiftWithDate, qty: qty, sisa: sisaBaru }));
 
             fetch(SCRIPT_URL, { method: 'POST', body: formData })
                 .then(res => {
@@ -993,13 +996,12 @@
                 .then(data => {
                     if(data.success) {
                         // Hanya update lokal JIKA API merespons sukses
-                        const newWithdrawal = { shift: shiftStr, qty: qty, sisa: sisaBaru };
+                        const newWithdrawal = { shift: shiftWithDate, qty: qty, sisa: sisaBaru };
                         batch.withdrawals.push(newWithdrawal);
                         
                         showToast('Tervalidasi & Dipotong', `Sisa stok batch di server menjadi ${sisaBaru} KG.`, 'success');
                         document.getElementById('out-qty').value = ''; 
                         
-                        // Refresh UI
                         const matVal = document.getElementById('out-material-value').value;
                         handleMaterialOutChange(matVal); 
                         
@@ -1151,6 +1153,7 @@
             window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
         }
 
+        // UPDATE INTI: Logika Time-Travel Cetak Dokumen (Bawa sisa stok bulan lalu)
         function renderPrintPreview() {
             const matId = document.getElementById('print-material-value').value;
             const bulan = document.getElementById('print-bulan').value; 
@@ -1171,9 +1174,84 @@
             const monthNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
             const bulanLabel = `${monthNames[parseInt(m)-1]} ${y}`;
 
-            const filteredBatches = stateBatches
-                .filter(b => b.materialId === matId && b.tglMasuk.startsWith(bulan))
-                .sort((a, b) => a.tglMasuk.localeCompare(b.tglMasuk));
+            const filteredBatches = [];
+
+            stateBatches.forEach(b => {
+                if (b.materialId !== matId) return;
+
+                let carryoverStock = b.jumlahAwal;
+                let targetMonthWithdrawals = [];
+                let hasActivityInTargetMonth = false;
+
+                // Variabel pelacak otomatis bulan untuk data lama (Legacy data tanpa timestamp)
+                let currentTrackedMonth = b.tglMasuk.substring(0, 7); // cth: "2026-09"
+                let lastTrackedDay = parseInt(b.tglMasuk.split('-')[2]); // cth: 24
+
+                b.withdrawals.forEach(w => {
+                    let wDate = b.tglMasuk; // Default
+                    
+                    // 1. Deteksi Timestamp Asli Backend (Jika Google Apps Script Anda dimodifikasi suatu hari)
+                    if (w.timestamp || w.tgl || w.waktu || w.date) {
+                        let rawTs = w.timestamp || w.tgl || w.waktu || w.date;
+                        try {
+                            let d = new Date(rawTs);
+                            if (!isNaN(d.getTime())) wDate = d.toISOString().split('T')[0];
+                        } catch(e) {}
+                    }
+                    // 2. Deteksi Timestamp Embed yang kita buat baru saja di form pengambilan
+                    else if (w.shift && String(w.shift).includes('|')) {
+                        wDate = String(w.shift).split('|')[0];
+                    }
+                    // 3. Smart Chronological Tracker (JIKA data benar-benar lama "24/S1")
+                    else if (w.shift) {
+                        let shiftStr = String(w.shift);
+                        let dayMatch = shiftStr.match(/^(\d{1,2})\//);
+                        if (dayMatch) {
+                            let day = parseInt(dayMatch[1]);
+                            
+                            // Deteksi lompatan bulan (Cth: Kemarin input tgl 24, sekarang input tgl 5)
+                            // Jika mundur jauh lebih dari 5 hari, anggap bulan telah berganti
+                            if (day < lastTrackedDay - 5) { 
+                                let [yy, mm] = currentTrackedMonth.split('-');
+                                let dateObj = new Date(parseInt(yy), parseInt(mm), 1); 
+                                currentTrackedMonth = dateObj.getFullYear() + '-' + String(dateObj.getMonth() + 1).padStart(2, '0');
+                            }
+                            
+                            lastTrackedDay = day;
+                            wDate = `${currentTrackedMonth}-${String(day).padStart(2, '0')}`;
+                        }
+                    }
+
+                    // Proses Penempatan Sisa Stok ke Bulan
+                    if (wDate < bulan + '-01') {
+                        // Jika terjadi SEBELUM bulan yang sedang dilihat -> Update Sisa (Carry-over)
+                        carryoverStock = w.sisa;
+                    } 
+                    else if (wDate.startsWith(bulan)) {
+                        // Jika terjadi DI DALAM bulan yang sedang dilihat -> Tampilkan
+                        targetMonthWithdrawals.push(w);
+                        hasActivityInTargetMonth = true;
+                    }
+                });
+
+                const isArrivedInTargetMonth = b.tglMasuk.startsWith(bulan);
+                const hasCarryover = carryoverStock > 0;
+
+                // Syarat tampil: Datang bulan ini ATAU Ada aktivitas bulan ini ATAU Masih ada sisa dari bulan lalu
+                if (isArrivedInTargetMonth || hasActivityInTargetMonth || (b.tglMasuk < bulan + '-01' && hasCarryover)) {
+                    let displayBatch = JSON.parse(JSON.stringify(b));
+                    
+                    if (!isArrivedInTargetMonth) {
+                        displayBatch.jumlahAwal = carryoverStock; // Ganti stok awal kedatangan dengan sisa bulan lalu
+                    }
+                    
+                    displayBatch.withdrawals = targetMonthWithdrawals;
+                    filteredBatches.push(displayBatch);
+                }
+            });
+
+            // Urutkan berdasarkan tanggal masuk
+            filteredBatches.sort((a, b) => a.tglMasuk.localeCompare(b.tglMasuk));
 
             let displayBlocks = [];
             filteredBatches.forEach(batch => {
@@ -1380,7 +1458,6 @@
             }, 3000);
         }
 
-        // FUNGSI LOGIN STRICT KE API SERVER (TIDAK ADA AKUN DUMMY LOKAL)
         function handleLogin(e) {
             e.preventDefault();
             const user = document.getElementById('username').value;
@@ -1475,18 +1552,8 @@
             document.getElementById('in-tgl').value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
             document.getElementById('out-tgl').value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
             
-            // Tarik data setelah masuk, gagal = tampilkan error block
             fetchDataFromServer(false);
         }
-
-        // NOTE: Register Service Worker (PWA) dinonaktifkan sepenuhnya untuk mencegah browser memaksa aplikasi membuka file cache offline (Local-First).
-        /*
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.getRegistrations().then(function(registrations) {
-                for(let registration of registrations) { registration.unregister() }
-            });
-        }
-        */
     </script>
 </body>
 </html>
